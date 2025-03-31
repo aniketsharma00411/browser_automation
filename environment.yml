@@ -2,8 +2,12 @@ name: browser_automation
 channels:
   - defaults
 dependencies:
+  - aiohappyeyeballs=2.4.4=py313hca03da5_0
+  - aiohttp=3.11.10=py313h80987f9_0
+  - aiosignal=1.2.0=pyhd3eb1b0_0
   - annotated-types=0.6.0=py313hca03da5_0
   - anyio=4.6.2=py313hca03da5_0
+  - attrs=24.3.0=py313hca03da5_0
   - brotli-python=1.0.9=py313h313beb8_9
   - bzip2=1.0.8=h80987f9_6
   - ca-certificates=2025.2.25=hca03da5_0
@@ -13,6 +17,7 @@ dependencies:
   - distro=1.9.0=py313hca03da5_0
   - expat=2.6.4=h313beb8_0
   - fastapi=0.112.2=py313hca03da5_0
+  - frozenlist=1.5.0=py313h80987f9_0
   - h11=0.14.0=py313hca03da5_0
   - httpcore=1.0.2=py313hca03da5_0
   - httpx=0.27.0=py313hca03da5_0
@@ -21,10 +26,13 @@ dependencies:
   - libcxx=14.0.6=h848a8c0_0
   - libffi=3.4.4=hca03da5_1
   - libmpdec=4.0.0=h80987f9_0
+  - multidict=6.1.0=py313h80987f9_0
   - ncurses=6.4=h313beb8_0
-  - openai=1.60.1=py313hca03da5_0
+  - openai=1.52.1=py313hca03da5_0
   - openssl=3.0.16=h02f6b3c_0
   - pip=25.0=py313hca03da5_0
+  - propcache=0.2.0=py313h80987f9_0
+  - psutil=5.9.0=py313h80987f9_1
   - pydantic=2.10.3=py313hca03da5_0
   - pydantic-core=2.27.1=py313h2aea54e_0
   - pysocks=1.7.1=py313hca03da5_0
@@ -43,14 +51,14 @@ dependencies:
   - tzdata=2025a=h04d1e81_0
   - urllib3=2.3.0=py313hca03da5_0
   - uvicorn=0.32.1=py313hca03da5_0
+  - websockets=10.4=py313h80987f9_2
   - wheel=0.45.1=py313hca03da5_0
   - xz=5.6.4=h80987f9_1
+  - yarl=1.18.0=py313h80987f9_0
   - zlib=1.2.13=h18a0788_1
   - pip:
       - dotenv==0.9.9
       - greenlet==3.1.1
-      - playwright==1.51.0
-      - playwright-stealth==1.0.6
       - pyee==12.1.1
       - python-dotenv==1.1.0
 prefix: /Users/aniketsharma00411/anaconda3/envs/browser_automation
