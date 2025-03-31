@@ -1,4 +1,5 @@
 from typing import Optional, Dict, Any, List
+from dotenv import load_dotenv
 import os
 from openai import OpenAI
 import json
@@ -12,11 +13,12 @@ import subprocess
 import psutil
 import signal
 import aiohttp
+import platform
+import os.path
 
 from src.id_manager import IdManager
 
-# Initialize OpenAI client
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+load_dotenv()
 
 
 class BrowserAgent:
@@ -28,12 +30,54 @@ class BrowserAgent:
             proxy_config: Dictionary containing proxy settings (e.g., {'server': 'http://proxy:port'})
             extensions: List of paths to Chrome extensions to load
         """
+
+        # Initialize OpenAI client
+        self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         self.browser_process = None
         self.ws = None
         self.debug_port = None
         self.id_manager = IdManager()
         self.proxy_config = proxy_config
         self.extensions = extensions or []
+        self.system = platform.system().lower()
+        self.chat_history = []
+
+    def _get_chrome_path(self) -> str:
+        """Get the path to Chrome executable based on OS"""
+        if self.system == "darwin":  # macOS
+            return "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        elif self.system == "linux":
+            # Try common Linux Chrome paths
+            possible_paths = [
+                "/usr/bin/google-chrome",
+                "/usr/bin/google-chrome-stable",
+                "/usr/bin/chromium",
+                "/usr/bin/chromium-browser"
+            ]
+            for path in possible_paths:
+                if os.path.exists(path):
+                    return path
+            return "google-chrome"  # Fallback to PATH
+        else:  # Windows
+            possible_paths = [
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                os.path.expandvars(
+                    r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe")
+            ]
+            for path in possible_paths:
+                if os.path.exists(path):
+                    return path
+            return "chrome"  # Fallback to PATH
+
+    def _get_user_data_dir(self) -> str:
+        """Get the appropriate user data directory based on OS"""
+        if self.system == "darwin":  # macOS
+            return "/tmp/chrome-automation"
+        elif self.system == "linux":
+            return "/tmp/chrome-automation"
+        else:  # Windows
+            return os.path.join(os.getenv("TEMP", "C:\\temp"), "chrome-automation")
 
     async def start(self):
         """Start a native browser instance with remote debugging enabled"""
@@ -45,7 +89,7 @@ class BrowserAgent:
             f'--remote-debugging-port={self.debug_port}',
             '--no-first-run',
             '--no-default-browser-check',
-            '--user-data-dir=/tmp/chrome-automation',
+            f'--user-data-dir={self._get_user_data_dir()}',
             '--disable-blink-features=AutomationControlled',
             '--disable-features=IsolateOrigins,site-per-process',
             '--disable-site-isolation-trials',
@@ -72,26 +116,16 @@ class BrowserAgent:
         # Add extensions if provided
         if self.extensions:
             chrome_args.append('--enable-extensions')
-            extension_paths = ','.join(os.path.abspath(path)
-                                       for path in self.extensions)
+            extension_paths = ','.join(path for path in self.extensions)
             chrome_args.append(
                 f'--disable-extensions-except={extension_paths}')
 
+        print(f"Starting Chrome with arguments: {' '.join(chrome_args)}")
         self.browser_process = subprocess.Popen(chrome_args)
 
         # Wait for browser to start and connect to debugging protocol
         await asyncio.sleep(2)  # Give browser time to start
         await self._connect_to_browser()
-
-    def _get_chrome_path(self) -> str:
-        # """Get the path to Chrome executable based on OS"""
-        # system = platform.system().lower()
-        # if system == "darwin":  # macOS
-        return "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-        # elif system == "linux":
-        #     return "google-chrome"
-        # else:  # Windows
-        #     return r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 
     async def _connect_to_browser(self):
         """Connect to browser's debugging protocol"""
@@ -403,6 +437,18 @@ class BrowserAgent:
             print(f"Error clicking element: {e}")
             raise
 
+    async def press_key(self, params: dict, press_type: str):
+        # Send keyDown event
+        await self.ws.send(json.dumps({
+            "id": self.id_manager.next_id(),
+            "method": "Input.dispatchKeyEvent",
+            "params": {
+                "type": press_type,
+                **params
+            }
+        }))
+        await self._wait_for_response(self.id_manager._current_id, f"Key press")
+
     async def keyboard_press(self, key: str):
         """Simulate pressing a key using Playwright-style API"""
         # Handle special keys
@@ -442,27 +488,8 @@ class BrowserAgent:
         # Get key parameters
         params = key_mapping.get(key, {'text': key})
 
-        # Send keyDown event
-        await self.ws.send(json.dumps({
-            "id": self.id_manager.next_id(),
-            "method": "Input.dispatchKeyEvent",
-            "params": {
-                "type": "keyDown",
-                **params
-            }
-        }))
-        await self._wait_for_response(self.id_manager._current_id, f"Key down for {key}")
-
-        # Send keyUp event
-        await self.ws.send(json.dumps({
-            "id": self.id_manager.next_id(),
-            "method": "Input.dispatchKeyEvent",
-            "params": {
-                "type": "keyUp",
-                **params
-            }
-        }))
-        await self._wait_for_response(self.id_manager._current_id, f"Key up for {key}")
+        await self.press_key(params, "keyDown")
+        await self.press_key(params, "keyUp")
 
         # Add a small delay between key events
         await asyncio.sleep(0.05)
@@ -496,6 +523,84 @@ class BrowserAgent:
 
         except Exception as e:
             print(f"Error filling text: {e}")
+            raise
+
+    async def clear_text(self, selector: str):
+        """Clear text from an input element using the given selector"""
+        try:
+            print(f"Clearing text from element with selector: {selector}")
+
+            # Find the element
+            node_id = await self._find_element(selector)
+
+            # Focus the element
+            await self.ws.send(json.dumps({
+                "id": self.id_manager.next_id(),
+                "method": "DOM.focus",
+                "params": {
+                    "nodeId": node_id
+                }
+            }))
+            await self._wait_for_response(self.id_manager._current_id, "Focus element")
+
+            # First ensure Runtime domain is enabled
+            await self.ws.send(json.dumps({
+                "id": self.id_manager.next_id(),
+                "method": "Runtime.enable"
+            }))
+            response = await self.ws.recv()
+            print(f"Runtime enable response: {response}")
+
+            # Construct JavaScript to clear the input value
+            js_script = f"""
+                (function() {{
+                    const element = document.querySelector('{selector}');
+                    if (!element) return false;
+                    element.value = '';
+                    // Trigger input event to ensure the change is registered
+                    element.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    return true;
+                }})()
+            """
+
+            # Send evaluation request
+            cmd_id = self.id_manager.next_id()
+            await self.ws.send(json.dumps({
+                "id": cmd_id,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": js_script,
+                    "returnByValue": True
+                }
+            }))
+
+            # Wait for the response
+            while True:
+                response = await self.ws.recv()
+                response_data = json.loads(response)
+                print(f"Received response: {response_data}")
+
+                # Skip any event messages
+                if 'method' in response_data:
+                    continue
+
+                # If this is our response
+                if response_data.get('id') == cmd_id:
+                    if "error" in response_data:
+                        raise Exception(
+                            f"Failed to clear text: {response_data['error']}")
+
+                    result = response_data.get("result", {}).get(
+                        "result", {}).get("value", False)
+                    if not result:
+                        raise Exception(
+                            f"Element not found with selector: {selector}")
+
+                    print("Successfully cleared text")
+                    return
+
+        except Exception as e:
+            print(f"Error clearing text: {e}")
             raise
 
     async def screenshot(self, path: str = None):
@@ -570,7 +675,7 @@ class BrowserAgent:
 
         except Exception as e:
             print(f"Error getting URL: {e}")
-            raise
+            return "No URL found"
 
     async def title(self) -> str:
         """Get the current page title"""
@@ -619,9 +724,9 @@ class BrowserAgent:
 
         except Exception as e:
             print(f"Error getting title: {e}")
-            raise
+            return "No title found"
 
-    async def get_page_info(self) -> Dict[str, Any]:
+    async def get_page_info(self, extract_data: str | None = None) -> Dict[str, Any]:
         """Gather information about the current page state with screenshot."""
         try:
             # Get the current URL and title
@@ -635,17 +740,23 @@ class BrowserAgent:
             filename = f"screenshots/screenshot_{timestamp}.png"
             screenshot_base64 = await self.screenshot(path=filename)
 
+            data = None
+            if extract_data:
+                extract_result = await self.extract(extract_data)
+                if extract_result["status"] == "success":
+                    data = extract_result["data"][:50]
+
             return {
                 "url": current_url,
                 "title": title,
-                "screenshot": screenshot_base64
+                "screenshot": screenshot_base64,
+                "data": data
             }
         except Exception as e:
             return {"error": str(e)}
 
     async def execute_command(self, command: str) -> Dict[str, Any]:
         try:
-            conversation_history = []
             page_info = None
             run_agent = True
             max_iterations = 10
@@ -670,7 +781,16 @@ class BrowserAgent:
                                 - url: The url to navigate to.  The value of the key will be the input to the goto function of playwright.
                                 - selector: Click on the element. The value of the key will be the input to the fill function of playwright.
                                 - text: The text to type. The value of the key will be the input to the fill function of playwright.
+                                - submit_selector: The selector for the login/submit button
+                            - login: Perform login action. For this we will have the following keys in the json:
+                                - url: The login page URL
+                                - username_selector: The selector for the username/email field
+                                - password_selector: The selector for the password field
+                                - username: The username/email to enter
+                                - password: The password to enter
+                                - submit_selector: The selector for the login/submit button
                         - needs_page_info: A boolean indicating whether you need to see the current page state before proceeding. If the user command has been executed, set this to false. Only set this to true if the user command has not been executed, confirm this from the screenshot.
+                        - extract_data: If needs_page_info is true, then you need to extract data from the page. Give a natural language description of the data you need to extract, this will be passed to another AI agent to extract the data based on the selector and attribute. This is required if needs_page_info is true.
 
                         Extra Information:
                         - If you are trying to input something at google.com then the selector is 'textarea[name="q"]'
@@ -681,9 +801,20 @@ class BrowserAgent:
                 # Add the user's command
                 messages.append({"role": "user", "content": command})
 
-                # Add conversation history with up to 5 messages
-                for msg in conversation_history[-5:]:
-                    messages.append(msg)
+                # Keep last 10 messages for context
+                for msg in self.chat_history[-10:]:
+                    # Ensure content is a string
+                    content = msg.get("content", None)
+                    if isinstance(content, dict):
+                        content = json.dumps(content)
+                    elif isinstance(content, list):
+                        content = json.dumps(content)
+
+                    if content is not None:
+                        messages.append({
+                            "role": msg["role"],
+                            "content": content
+                        })
 
                 # Add page information if provided
                 if page_info:
@@ -692,7 +823,8 @@ class BrowserAgent:
                         "content": [
                             {
                                 "type": "text",
-                                "text": f"Current URL: {page_info['url']}\nCurrent Title: {page_info['title']}"
+                                "text": f"Current URL: {page_info['url']}\nCurrent Title: {page_info['title']}",
+                                "extract_data": page_info["data"]
                             },
                             {
                                 "type": "image_url",
@@ -705,11 +837,11 @@ class BrowserAgent:
                     })
 
                 # Get response from OpenAI
-                response = client.chat.completions.create(
+                response = self.client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=messages
                 )
-                conversation_history.append({
+                self.chat_history.append({
                     "role": "assistant",
                     "content": response.choices[0].message.content.strip()
                 })
@@ -722,35 +854,12 @@ class BrowserAgent:
                 except json.JSONDecodeError as e:
                     print(f"JSON parsing error: {str(e)}")
                     print(f"Invalid JSON content: {content}")
-                    conversation_history.append({
+                    self.chat_history.append({
                         "role": "user",
                         "content": f"Failed to parse AI response: {str(e)}"
                     })
                     continue
 
-                # parsed_command = {
-                #     "action": "navigate",
-                #     "url": "https://www.google.com",
-                #     "needs_page_info": False
-                # }
-                # parsed_command = {
-                #     "action": "click",
-                #     "selector": "a[href*='linkedin.com']",
-                #     "needs_page_info": False
-                # }
-                # parsed_command = {
-                #     "action": "type",
-                #     "selector": 'textarea[name="q"]',
-                #     "text": "aniket sharma",
-                #     "needs_page_info": False
-                # }
-                # parsed_command = {
-                #     "action": "search",
-                #     "url": "https://www.google.com",
-                #     "selector": 'textarea[name="q"]',
-                #     "text": "aniket sharma",
-                #     "needs_page_info": False
-                # }
                 # Execute the parsed command
                 try:
                     if parsed_command["action"] == "navigate":
@@ -762,11 +871,25 @@ class BrowserAgent:
                     elif parsed_command["action"] == "search":
                         await self.goto(parsed_command["url"])
                         await self.fill(parsed_command["selector"], parsed_command["text"])
-                        await self.keyboard_press('Enter')
+
+                        # Try both Enter key and submit button if available
+                        try:
+                            await self.click(parsed_command["submit_selector"])
+                        except Exception as e:
+                            await self.keyboard_press('Enter')
+                    elif parsed_command["action"] == "login":
+                        await self.goto(parsed_command["url"])
+                        await self.fill(parsed_command["username_selector"], parsed_command["username"])
+                        await self.fill(parsed_command["password_selector"], parsed_command["password"])
+                        try:
+                            await self.click(parsed_command["submit_selector"])
+                        except Exception as e:
+                            await self.keyboard_press('Enter')
+                    await self.keyboard_press('Enter')
 
                 except Exception as e:
                     print(f"Command execution error: {str(e)}")
-                    conversation_history.append({
+                    self.chat_history.append({
                         "role": "user",
                         "content": f"Failed to execute command: {str(e)}"
                     })
@@ -774,14 +897,14 @@ class BrowserAgent:
 
                 # Check if we need page information
                 if parsed_command["needs_page_info"]:
-                    page_info = await self.get_page_info()
+                    page_info = await self.get_page_info(parsed_command.get("extract_data", None))
                 else:
                     run_agent = False
 
             return {
                 "status": "success",
                 "message": f"Executed command: {command}",
-                "conversation_history": conversation_history
+                "chat_history": self.chat_history
             }
 
         except Exception as e:
@@ -898,7 +1021,7 @@ class BrowserAgent:
             ]
 
             # Get response from OpenAI
-            response = client.chat.completions.create(
+            response = self.client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=messages
             )
